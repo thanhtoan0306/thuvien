@@ -1,0 +1,1801 @@
+/*
+ Controller:    nRF52832
+ Hardware:      BT_RFIDREADER_REV02
+ Folder/SDK:	C:\Nordic Semi\nRF5_SDK_16.0.0\examples\ble_peripheral\experimental\ble_app_cgms
+ Application:   BLE RFID Reader
+ IDE:           Segger Embedded Studio
+ Complier:      Theo Segger Embedded Studio
+ Programer:	Segger J-Link (nRF52832 Starter Kit)(nRFgo Studio + SoftDevice S132)
+ Company:       OSSTech Co.,Ltd
+ Writer:        Vo Duc Minh
+ Date:          2019.10.29, 2019.11.13, 2019.12.02, 2019.12.23,
+                2020.01.10, 2020.01.15, 2020.02.28, 2020.03.05, 2020.07.31
+
+ * Cac file da sua:
+
+ * Cac file lay tu thu vien-chuyen sang cung thu muc voi project, va doi ten.
+ Ta khong can tac dong den cac file nay nua.
+ cgms_db.c -> rfid_db.c
+ cgms_db.h -> rfid_db.h
+ cgms_meas.c -> rfid_meas.c
+ cgms_meas.h -> rfid_meas.h
+ cgms_racp.c -> rfid_racp.c
+ cgms_racp.h -> rfid_racp.h
+ cgms_socp.c -> rfid_socp.c
+ cgms_socp.h -> rfid_socp.h
+ cgms_sst.c -> rfid_sst.c
+ cgms_sst.h -> rfid_sst.h
+ nrf_ble_cgms.c -> rfid_nrf_ble.c
+ nrf_ble_cgms.h -> rfid_nrf_ble.h
+
+ * Ngay 2020.01.15:
+ Sua trong file "rfid_meas.c": tang kieu du lieu cho cgms tu 16bit len 40bit. Nhu vay moi du cho du lieu rfid.
+ 
+ * Ngay 2020.02.20:
+ Sua trong file "rfid_socp.c": viet them code trong ham "on_socp_value_write" de nhan du lieu tu app. Luu flash.
+ Sua trong file "sdk_config.h": khai bao cac dia chi flash.
+ + Phan tich goi tin nhan duoc tu characteristic "CGM Specific Ops Control Point" va luu vao flash.
+ De lay ten thiet bi, thi "socp_request.p_operand" chi cho phep max 20 kytu thoi.
+ VD: "TenTB=voducminh12345" ok
+     "TenTB=voducminh123456" thi kg dc vi 21 kytu.
+ 
+ * Ngay 2020.03.05:
+ Sua trong project: them thu vien "nRF_Drivers" >> "nrf_nvmc.c"
+ Sua trong file "rfid_socp.c": them thu vien #include "nrf_nvmc.h"
+                  
+ */
+
+#include <stdint.h>
+#include <string.h>
+#include "nordic_common.h"
+#include "nrf.h"
+#include "app_error.h"
+#include "ble.h"
+#include "ble_srv_common.h"
+#include "ble_advertising.h"
+#include "ble_conn_params.h"
+#include "sensorsim.h"
+#include "nrf_sdh.h"
+#include "nrf_sdh_soc.h"
+#include "nrf_sdh_ble.h"
+#include "app_timer.h"
+#include "bsp_btn_ble.h"
+#include "peer_manager.h"
+#include "peer_manager_handler.h"
+#include "fds.h"
+#include "ble_conn_state.h"
+#include "nrf_ble_qwr.h"
+#include "nrf_ble_gatt.h"
+#include "ble_bas.h"
+#include "nrf_ble_bms.h"
+#include "rfid_nrf_ble.h"
+#include "ble_dis.h"
+#include "ble_racp.h"
+#include "nrf_pwr_mgmt.h"
+
+// Minh them vao
+#include <stdbool.h>
+#include "nrf_delay.h"
+#include "nrf52.h"
+
+#define MANUFACTURER_NAME               "OSSTECH Co.,Ltd"                           /**< Manufacturer. Will be passed to Device Information Service. */
+
+#define USE_AUTHORIZATION_CODE          1
+
+#define APP_BLE_OBSERVER_PRIO           3                                           /**< Application's BLE observer priority. You shouldn't need to modify this value. */
+#define APP_BLE_CONN_CFG_TAG            1                                           /**< A tag identifying the SoftDevice BLE configuration. */
+
+#define GLUCOSE_MEAS_INTERVAL           1                                           /**< Fastest possible communication interval*/
+
+#define SECOND_10_MS_UNITS              100                                         /**< Definition of 1 second, when 1 unit is 10 ms. */
+#define MIN_CONN_INTERVAL               7                                           /**< Minimum acceptable connection interval (0.25 seconds), Connection interval uses 1.25 ms units. */
+#define MAX_CONN_INTERVAL               400                                         /**< Maximum acceptable connection interval (0.5 second), Connection interval uses 1.25 ms units. */
+#define SLAVE_LATENCY                   0                                           /**< Slave latency. */
+#define CONN_SUP_TIMEOUT                (4 * SECOND_10_MS_UNITS)                    /**< Connection supervisory timeout (4 seconds), Supervision Timeout uses 10 ms units. */
+
+#define FIRST_CONN_PARAMS_UPDATE_DELAY  APP_TIMER_TICKS(15000)                      /**< Time from initiating event (connect or start of notification) to first time sd_ble_gap_conn_param_update is called (5 seconds). */
+#define NEXT_CONN_PARAMS_UPDATE_DELAY   APP_TIMER_TICKS(5000)                       /**< Time between each call to sd_ble_gap_conn_param_update after the first call (30 seconds). */
+#define MAX_CONN_PARAMS_UPDATE_COUNT    3                                           /**< Number of attempts before giving up the connection parameter negotiation. */
+
+#define APP_ADV_FAST_INTERVAL           80   /**< Fast advertising interval (in units of 0.625 ms. This value corresponds to 50ms.) */
+#define APP_ADV_SLOW_INTERVAL           1600 /**< Slow advertising interval (in units of 0.625 ms. This value corresponds to 1s). */
+
+#define APP_ADV_FAST_DURATION           (2*6000) /**< 2 phut The advertising duration of fast advertising in units of 10 milliseconds. */
+#define APP_ADV_SLOW_DURATION           (5*6000) /**< 5 phut The advertising duration of slow advertising in units of 10 milliseconds. */
+
+#define MEM_BUFF_SIZE                   512
+
+#define DEAD_BEEF                       0xDEADBEEF                                  /**< Value used as error code on stack dump, can be used to identify stack location on stack unwind. */
+
+APP_TIMER_DEF(m_battery_timer_id);                                                  /**< Battery timer. */
+BLE_BAS_DEF(m_bas);                                                                 /**< Battery service instance. */
+NRF_BLE_CGMS_DEF(m_cgms);                                                           /**< CGMS instance. */
+NRF_BLE_BMS_DEF(m_bms);                                                             /**< Bond Management service instance. */
+NRF_BLE_GATT_DEF(m_gatt);                                                           /**< GATT module instance. */
+NRF_BLE_QWR_DEF(m_qwr);                                                             /**< Context for the Queued Write module. */
+BLE_ADVERTISING_DEF(m_advertising);                                                 /**< Advertising module instance. */
+NRF_BLE_GQ_DEF(m_ble_gatt_gueue,                                                    /**< BLE GATT Queue instance. */
+               NRF_SDH_BLE_PERIPHERAL_LINK_COUNT,
+               NRF_BLE_GQ_QUEUE_SIZE);
+
+static uint16_t m_conn_handle = BLE_CONN_HANDLE_INVALID,                            /**< Handle of the current connection. */
+                m_current_offset;
+
+static ble_conn_state_user_flag_id_t m_bms_bonds_to_delete;                         /**< Flags used to identify bonds that should be deleted. */
+static bool delete_all_pending = false;                                             /**< Flag to show that advertising should not be started after a single peer is deleted (@ref PM_EVT_PEER_DELETE_SUCCEEDED) because we are waiting for ALL peers to be deleted (@ref PM_EVT_PEERS_DELETE_SUCCEEDED). */
+
+static sensorsim_cfg_t   m_battery_sim_cfg;                                         /**< Battery Level sensor simulator configuration. */
+static sensorsim_state_t m_battery_sim_state;                                       /**< Battery Level sensor simulator state. */
+
+static ble_uuid_t m_adv_uuids[] = {{BLE_UUID_CGM_SERVICE,  BLE_UUID_TYPE_BLE},};    /**< Universally unique service identifiers. */
+
+#if USE_AUTHORIZATION_CODE
+static uint8_t m_auth_code[]            = {'A', 'B', 'C', 'D'}; //0x41, 0x42, 0x43, 0x44
+static int m_auth_code_len              = sizeof(m_auth_code);
+#endif
+
+#define BTN1 (1<<13)
+#define BTN2 (1<<14)
+#define BTN3 (1<<15)
+#define BTN4 (1<<16)
+
+#define LED1 (1<<17)
+#define LED2 (1<<18)
+#define LED3 (1<<19)
+#define LED4 (1<<20)
+
+#define BUZZER 5
+#define TEST_POINT_P26 26
+#define TEST_POINT_P28 28
+#define TEST_POINT_P29 29
+#define TEST_POINT_P20 20
+#define TEST_POINT_P22 22
+#define TEST_POINT_P23 23
+#define TEST_POINT_P24 24
+#define TEST_POINT_P25 25
+#define TEST_POINT_P13 13
+#define TEST_POINT_P14 14
+#define TEST_POINT_P8  8
+#define TEST_POINT_P9  9
+#define TEST_POINT_P10 10
+#define TEST_POINT_P11 11
+#define TEST_POINT_P6  6
+#define BT_HANDLE_PIN           12  // Noi voi P0.16 de kich hoat P0.16.
+#define ACTIVE_EM_PIN           27
+#define KENH_ANA_BATT           7   // la AIN7
+#define PinDieukhien5V          30
+#define RFID_DTA_PIN1           3   // De doc muc logic DTA
+#define RFID_DTA_PIN2           4   // De bat xung len
+#define RFID_CLK_PIN            7   // De dem xung clock
+#define RFID_DTA_SAMPLING       ((NRF_P0->IN & (1<<RFID_DTA_PIN1))&&1)
+
+#define SO_BYTES_TRONG_MASOTHE  5
+#define XUNG_TPHONG             14  // Thong so nay co the chinh tuy y trong khoang 5 den 16,
+                                    // cpu chay nhanh thi tiem can 16, neu cpu chay cham thi tiem can 5.
+
+#define CANHLEN_RFID_DTA        (NRF_GPIOTE->EVENTS_IN[RFID_DTA_PIN2])
+#define DEM_RFID_CLK            (NRF_TIMER2->CC[0])
+#define XOA_DEM_RFID_CLK        (NRF_TIMER3->TASKS_START=1)   // Tu dong STOP qua PPI
+
+APP_TIMER_DEF(batt_level_timer_id);
+#define DINH_THOI_KTRA_PIN            APP_TIMER_TICKS(59000)  // 59s de kg bi trung voi 2 phut
+#define BATTERY_LEVEL_MEAS_INTERVAL   APP_TIMER_TICKS(120000) // 2 phut gui % pin len app 1 lan
+
+APP_TIMER_DEF(em4095_timer_id);
+#define TGIAN_TAT_EM4095   APP_TIMER_TICKS(100)  // 100ms
+#define TGIAN_BAT_EM4095   APP_TIMER_TICKS(200)  // 200ms
+
+#define TGIAN_GIAIMA      94    // 94ms
+#define SL_ADC_TRUNGBINH  21    // So luong nay tuy y nguoi su dung
+#define PWM_CNT_TOP       46    // =(PRESCALER 125000 Hz / tan so mong muon).
+#define TGIAN_COIKEU      74    // 74ms
+#define TGIAN_CHONGLAPTHE 800   // 800ms
+
+static uint8_t m_mem[MEM_BUFF_SIZE], battLevel=100, knoiApp=0, bienHang, bienCot,
+               maTran[11][5], em4102[SO_BYTES_TRONG_MASOTHE], em4102Sub[SO_BYTES_TRONG_MASOTHE],
+               manchesterBit, bienDem110, em4102Memory[120],
+               bienLatGiaima=1;
+static uint16_t battLevelAvg[SL_ADC_TRUNGBINH],
+                pwmLduty[4]={23, 0, 0, 0};  // pwmLduty la L-duty trong chu ky; nen tang pwmLduty la giam H-duty.
+                                            // Duty 50% nen bang 23 = (PWM_CNT_TOP / 2).
+                                            // Chi dat gia tri tai pwmLduty[0] vi chi can phat xung ra PSEL.OUT[0] thoi.
+static uint32_t tGiaima, bienChay, bienChung, kquaAdcBatt[1], tCoikeu=0, tChongLapThe=0; // 32 bit
+static volatile uint32_t tMs=0;	// Vi bien xuat hien trong ham ngat nen phai khai bao la volatile
+static uint64_t dtaRfid;
+
+typedef enum
+{
+    DO_RONG_XUNG_DTA=0,
+    DO_RONG_XUNG_DTA_CANH2,
+    BATDAU_90MS,
+    CHO_90MS_TIM9BIT1,
+    KTRA_PARITY
+} _CHUTRINH_GIAIMA;
+_CHUTRINH_GIAIMA chutrinhGiaima= DO_RONG_XUNG_DTA;
+
+//**********************************************************************************************
+
+// Cac ham ngat dat static thi lam cho cong suat kg giam duoc.
+void TIMER1_IRQHandler (void)
+{
+    // Giua moi lan co EVENTS_COMPARE[0] bat len la 1ms.
+    if(NRF_TIMER1->EVENTS_COMPARE[0])     // Bat EVENTS_COMPARE[0] vi lien quan CC[0]
+    {
+        NRF_TIMER1->EVENTS_COMPARE[0]=0;  // Kg co thi kg chay
+        ++tMs;
+    }
+}
+
+//**********************************************************************************************
+
+static void batt_level_timeout_handler(void * p_context)
+{
+    uint8_t bienTam, bienTam2;
+    uint32_t bienTam1;
+    UNUSED_PARAMETER(p_context);
+
+    // Cai dat SAADC
+    NRF_SAADC->CH[KENH_ANA_BATT].PSELP=8;       // AIN7 - P0.31
+    NRF_SAADC->CH[KENH_ANA_BATT].PSELN=0;       // Not connect
+    NRF_SAADC->CH[KENH_ANA_BATT].CONFIG=(0      // Bypass RESP
+                                         |0<<4  // Bypass RESN
+                                         |5<<8  // Gain=1
+                                         |0<<12 // Internal Ref 0.6V
+                                         |2<<16 // TACQ 10us
+                                         |0<<20 // Mode SingleEnd, PSELN will be ignored, negative input to ADC shorted to GND
+                                         );
+    // Tu dong nhan biet so luong kenh
+    bienTam2=0;
+    for (bienTam=0; bienTam<8; bienTam++) // 8 la kenh analog 1->8 cua nRF52832
+    {
+        if (NRF_SAADC->CH[bienTam].PSELP)
+            ++bienTam2;
+    }
+    NRF_SAADC->RESOLUTION=1;                // 1 = 10-bit
+    NRF_SAADC->SAMPLERATE=0;                // Rate is controlled from SAMPLE task
+    NRF_SAADC->RESULT.PTR = (uint32_t)&kquaAdcBatt;
+    NRF_SAADC->RESULT.MAXCNT=bienTam2;
+    NRF_SAADC->ENABLE=1;
+
+    // Xoa cac co bao truoc khi cho ADC chay tiep
+    NRF_SAADC->EVENTS_STARTED=0;
+    NRF_SAADC->EVENTS_RESULTDONE=0;
+
+    // Bat dau convert lai 1 lan nua
+    NRF_SAADC->TASKS_START = 1;   // Ngay sau lenh nay, TASKS_START tu xoa thanh 0
+    while (!NRF_SAADC->EVENTS_STARTED);
+    NRF_SAADC->TASKS_SAMPLE = 1;  // Ngay sau lenh nay, TASKS_SAMPLE tu xoa thanh 0,
+                                  // Tuc la, TASKS_SAMPLE=1 de cho phep 1 lan convert, va ADC chi convert 1 lan roi dung lai.
+    while (!NRF_SAADC->EVENTS_RESULTDONE);  // Co ve on dinh hon EVENTS_DONE
+                                            // Sau lenh nay, EVENTS_RESULTDONE van = 1
+    while (NRF_SAADC->STATUS);  // Nen kiem tra thanh ghi nay, vi:
+                                // EVENTS_RESULTDONE may occur before the actual values transferred into RAM by EasyDMA.
+    NRF_SAADC->TASKS_STOP=1;
+    while(!NRF_SAADC->EVENTS_STOPPED);
+    // Tat ca cac while tren chay qua rat nhanh, khoang it hon 18.6us
+    
+    /*
+    battLevel la ket qua cuoi cung de gui len app.
+    battLevelAvg:     [0]...[SL_ADC_TRUNGBINH-2]            [SL_ADC_TRUNGBINH-1]
+                          lich su kqua adc                    so luong hien tai
+
+    785 tuong ung muc ap minnimum 0.46V tren thang do, 2 don vi tuong ung voi 1%
+    Tom tat:    V batt    V thang dien tro    Phan tram     Gia tri ADC
+                 4.2V          0.6V             100%           1023
+                 ---           ---              ---            ---
+                 3.227V        0.461V            1%             787
+                 3.2V          0.46V             0%             785
+    */
+    battLevelAvg[battLevelAvg[SL_ADC_TRUNGBINH-1]]=((kquaAdcBatt[0]&0x3FF)-785)/2;
+
+    // Ket qua cuoi cung la trung binh cong cua 20 ket qua trung gian
+    bienTam1=0;
+    bienTam2=0;
+    for(bienTam=0; bienTam<(SL_ADC_TRUNGBINH-1); bienTam++)
+    {
+        bienTam1 += battLevelAvg[bienTam];
+        if(battLevelAvg[bienTam]!=0)
+            ++bienTam2;
+    }
+    battLevel = (bienTam1/bienTam2);
+
+    // Luu het 20 ket qua thi quay ve ban dau de luu.
+    ++battLevelAvg[SL_ADC_TRUNGBINH-1];
+    if(battLevelAvg[SL_ADC_TRUNGBINH-1]==(SL_ADC_TRUNGBINH-1))
+        battLevelAvg[SL_ADC_TRUNGBINH-1]=0;
+}
+
+//**********************************************************************************************
+
+void BatPWM0(void)
+{
+    // Cai dat PWM0
+    NRF_PWM0->DECODER           = (2 |      // Load Individual
+                                  (0<<8));  // Refresh
+    NRF_PWM0->PSEL.OUT[0]       = (BUZZER |
+                                  (0<<31)); // Internal Connect
+    NRF_PWM0->MODE              = 0;        // Up counter - edge aligned PWM duty-cycle
+    NRF_PWM0->PRESCALER         = 7;        // Divide by 128 ( 125kHz)
+    NRF_PWM0->COUNTERTOP        = PWM_CNT_TOP;
+    NRF_PWM0->SEQ[0].PTR        = (uint32_t)pwmLduty;
+    NRF_PWM0->SEQ[0].CNT        = 4; // 0, 1, 2, 3 deu kg chay; phai dat 4 moi dc
+    NRF_PWM0->SEQ[0].REFRESH    = 0; // Kg co cung dc.
+                                     // Setting the register to zero will result in a new duty cycle update every PWM period
+                                     // as long as the minimum PWM period is observed.
+    NRF_PWM0->SEQ[0].ENDDELAY   = 0; // Kg co cung dc
+    NRF_PWM0->ENABLE            = 1; // Nen dat o cuoi vi khi ENABLE=0 thi PSEL.OUT moi co tac dung
+    NRF_PWM0->TASKS_SEQSTART[0] = 1;
+}
+
+void TatPWM0(void)
+{
+    NRF_PWM0->ENABLE      = 0;  // Kg co van chay
+    NRF_PWM0->TASKS_STOP  = 1;
+}
+
+//**********************************************************************************************
+
+void TatNgoaiviQuetthe(void)
+{
+    NRF_P0->OUTCLR = (1<<ACTIVE_EM_PIN);
+    NRF_GPIOTE->CONFIG[RFID_DTA_PIN2]=0;  // Tat di vi khi active cung tieu ton max 0.5uA
+    NRF_GPIOTE->CONFIG[RFID_CLK_PIN]=0;
+    NRF_PPI->CHENCLR = 1;
+    NRF_PPI->CHENCLR = (1<<1);
+    NRF_PPI->CHENCLR = (1<<2);
+    NRF_TIMER2->TASKS_STOP = 1;
+    NRF_TIMER3->TASKS_STOP = 1;
+}
+
+//**********************************************************************************************
+
+static void Em4095_timeout_handler(void * p_context)
+{
+    ret_code_t err_code;
+    while(1)
+    {
+        err_code = app_timer_stop(em4095_timer_id); // Lenh nay xu ly cuc ky nhanh
+        if (err_code == NRF_SUCCESS)
+            break;
+        // Neu dung "APP_ERROR_CHECK(err_code)" thi hay bi loi mat ket noi voi app
+    }
+    switch(knoiApp)
+    {
+        case 1:
+        {
+            knoiApp=0x11;
+            while(1)
+            {
+                err_code = app_timer_start(em4095_timer_id, TGIAN_BAT_EM4095, NULL);
+                if (err_code == NRF_SUCCESS)
+                    break;
+            }
+            
+            //......................................................................................
+
+            // Cho EM4095 chay
+            NRF_P0->OUTSET = (1<<ACTIVE_EM_PIN);
+            
+            //......................................................................................
+
+            // Cai dat GPIOTE de bat canh len RFID data. Kg can cai dat NRF_P0->PIN_CNF[RFID_DTA_PIN2],
+            // vi event mode la da config thanh input luon roi.
+            NRF_GPIOTE->CONFIG[RFID_DTA_PIN2] = (1|                 // Event mode
+                                                (RFID_DTA_PIN2<<8)| // Chon chan tin hieu la RFID_DTA_PIN2
+                                                (1<<16));           // Polarity=LoToHi 
+
+            //......................................................................................
+            
+            // Cai dat GPIOTE. Kg can cai dat NRF_P0->PIN_CNF[RFID_CLK_PIN], vi event mode la da config thanh input luon roi.
+            NRF_GPIOTE->CONFIG[RFID_CLK_PIN] = (1|                // Event mode
+                                               (RFID_CLK_PIN<<8)|
+                                               (1<<16));          // Polarity=LoToHi
+            // Cai dat Counter2 va PPI[0]
+            // Can Counter2 de dem RFID Clock, nhung lien quan GPIOTE-PPI vi nRF52 kg co chan rieng biet cho chuc nang dem.
+            NRF_PPI->CH[0].EEP    = (uint32_t)&(NRF_GPIOTE->EVENTS_IN[RFID_CLK_PIN]);
+            NRF_PPI->CH[0].TEP    = (uint32_t)&(NRF_TIMER2->TASKS_COUNT);
+            NRF_PPI->FORK[0].TEP  = (uint32_t)&(NRF_TIMER2->TASKS_CAPTURE[0]);
+            NRF_PPI->CHENSET      = 1; // Kenh 0
+            // Cai dat Counter2 de dem xung RFID_CLK
+            NRF_TIMER2->MODE            = 2;  // Che do Low Power Counter
+            NRF_TIMER2->BITMODE         = 1;  // 8 bit width
+            NRF_TIMER2->TASKS_CLEAR     = 1;
+            NRF_TIMER2->TASKS_START     = 1;
+
+            //......................................................................................
+
+            // Cai dat PPI[1], lien quan Timer3
+            NRF_PPI->CH[1].EEP = (uint32_t)&(NRF_TIMER3->EVENTS_COMPARE[0]);
+            NRF_PPI->CH[1].TEP = (uint32_t)&(NRF_TIMER2->TASKS_CLEAR);
+            NRF_PPI->CHENSET = (1<<1);
+            // Cai dat Timer3 va PPI[2]
+            // Vi sao dung timer nay: xem 2 hinh "XOA_DEM_RFID_CLK chay ok.jpg", "XOA_DEM_RFID_CLK chay sai.jpg"
+            NRF_PPI->CH[2].EEP = (uint32_t)&(NRF_TIMER3->EVENTS_COMPARE[1]);
+            NRF_PPI->CH[2].TEP = (uint32_t)&(NRF_TIMER2->TASKS_COUNT);
+            NRF_PPI->FORK[2].TEP = (uint32_t)&(NRF_TIMER2->TASKS_CAPTURE[0]);
+            NRF_PPI->CHENSET = (1<<2);
+            // Cai dat Timer3, ho tro XOA_DEM_RFID_CLK
+            NRF_TIMER3->CC[0]		= 1;        // De cho NRF_TIMER2->TASKS_CLEAR xay ra truoc
+            NRF_TIMER3->CC[1]		= 2;        // De cho NRF_TIMER3->EVENTS_COMPARE[1] xay ra sau
+            NRF_TIMER3->SHORTS		= ((1<<1)|  // Enable shortcut between COMPARE[1] event and CLEAR task
+                                           (1<<9)); // Enable shortcut between COMPARE[1] event and STOP task
+            NRF_TIMER3->MODE		= 0;        // Che do Timer
+            NRF_TIMER3->BITMODE		= 1;        // 8 bit timer bit width
+            NRF_TIMER3->PRESCALER	= 0;        // Sao cho nhanh nhat co the
+
+            //......................................................................................
+            
+            break;
+        }
+
+        case 0x11:
+        {
+            knoiApp=1;  // Vi chay den day la da co ket noi voi app roi, nen phai tra ve 1
+            while(1)
+            {
+                err_code = app_timer_start(em4095_timer_id, TGIAN_TAT_EM4095, NULL);
+                if (err_code == NRF_SUCCESS)
+                    break;
+            }
+            // Tat peripheral trc khi sleep de tiet kiem dien het muc co the
+            TatNgoaiviQuetthe();
+            break;
+        }
+    }
+}
+
+//**********************************************************************************************
+
+bool Tim9Bit1 (void)
+{
+    // Vi cach giai ma cu delay rat nhieu lan 32 xung rfid nen gay tre va de sai. Bay gio dung cach khac, ta se cho canh
+    // len, sau do nhieu nhat la 4 lan delay lien tuc 32 xung clock, nhu vay it sai sot hon.
+    // Toi day kg nen "return" lien tuc nhu trong "GiaiMaEm4102(void)", se mat RFID clock-kg chay dc.
+    
+    /*
+    Bo doan code nay van chay duoc:
+    XOA_DEM_RFID_CLK;
+    CANHLEN_RFID_DTA=0;
+    while(!CANHLEN_RFID_DTA)
+    {
+        // Cho xung dau tien lam moc, la xung len dau tien trong hinh "rfid_grafik.gif", thuoc phan cuoi cua StopBit.
+        if (DEM_RFID_CLK > (64+64+XUNG_TPHONG)) // Day la loai xung dai nhat
+            return 0;
+    }
+    */
+
+    // Xung dau tien xuat hien roi, ta se cho xung thu 2 xuat hien, luc cho se kiem tra vai dieu kien
+    // Xung truoc vua xuat hien la XOA_DEM_RFID_CLK ngay, sau do lai cho xung tiep theo nen viec
+    // DEM_RFID_CLK van ok - kg bi hao hut.
+    XOA_DEM_RFID_CLK;
+    CANHLEN_RFID_DTA=0;
+    bienChay=0;
+    while(!CANHLEN_RFID_DTA) // Cho xung RFID_DTA xuat hien
+    {
+        // Vi ngay sau day co nhieu xu ly lien quan DEM_RFID_CLK, nen luu 1 lan de dung chung, tranh sai lech khi read DEM_RFID_CLK.
+        bienHang=DEM_RFID_CLK;
+        // Kiem tra 3 vi tri dau tien trong hinh "rfid_grafik.gif"
+        if ((bienHang==XUNG_TPHONG)||(bienHang==(XUNG_TPHONG+32))||(bienHang==(XUNG_TPHONG+32*2)))
+        {
+            if ((bienChay==0)&&(!RFID_DTA_SAMPLING))
+                return 0;
+            else if ((bienChay==1)&&(!RFID_DTA_SAMPLING))
+                return 0;
+            else if ((bienChay==2)&&RFID_DTA_SAMPLING)
+                return 0;
+            ++bienChay;
+            while ((DEM_RFID_CLK-bienHang)==0); // Cho DEM_RFID_CLK tang len mot chut, neu kg thi cpu se quet moc XUNG_TPHONG
+                                                // mot lan nua - do cpu nhanh hon clock RFID.
+        }
+        else if (bienHang > (64+32+XUNG_TPHONG))// Loai bo xung data qua dai
+            return 0;                           // Can bat duoc 01 (chinh la giao diem bit stop va bit 1 dau tien)
+    }
+    if (bienChay<3)     // Neu dung thi phai bang 3; loai bo xung qua ngan, xung ngan thi chi bang 0-1-2 la cung
+        return 0;
+    //.......................................................................................
+    // Kiem tra 8 bit 1 tiep theo trong so 9 bit 1, co the co data nua.
+    bienDem110=1;   // Vi sau nay co dieu kien chia het cho 2, nen dat bang 1 tu ban dau cho de hieu.
+    for (bienChay=0; bienChay<8; ++bienChay)
+    {
+        XOA_DEM_RFID_CLK;
+        CANHLEN_RFID_DTA=0;
+        bienCot=0;
+        while(!CANHLEN_RFID_DTA)
+        {
+            // Vi ngay sau day co nhieu xu ly lien quan DEM_RFID_CLK, nen luu 1 lan de dung chung, tranh sai lech khi read DEM_RFID_CLK.
+            bienHang=DEM_RFID_CLK;
+            if ((bienHang==XUNG_TPHONG)||(bienHang==(XUNG_TPHONG+32)))
+            {
+                ++bienCot;
+                while ((DEM_RFID_CLK-bienHang)==0); // Cho DEM_RFID_CLK tang len mot chut, neu kg thi cpu se quet moc XUNG_TPHONG
+                                                    // mot lan nua - do cpu nhanh hon clock RFID.
+            }
+            if ((bienHang==XUNG_TPHONG)&&(!RFID_DTA_SAMPLING))
+                return 0;
+            else if ((bienHang==XUNG_TPHONG+32)&&RFID_DTA_SAMPLING)
+                return 0;
+            else if ((bienChay==7)&&(bienHang==(XUNG_TPHONG+32*2)))
+            {
+                em4102Memory[bienDem110]=RFID_DTA_SAMPLING;
+                ++bienDem110;
+                while ((DEM_RFID_CLK-bienHang)==0);
+                // Cho xung len chu kg break, vi con phai lay moc xung len de sau nay XOA_DEM_RFID_CLK nua.
+                // bienCot kg can xuat hien trong nay
+            }
+            else if ((bienChay==7)&&(bienHang>(64+32+XUNG_TPHONG))) // Loai bo xung data qua dai
+                return 0;
+            else if ((bienChay<7)&&(bienHang>(64+XUNG_TPHONG)))     // Loai bo xung data qua dai
+                return 0;
+        }
+        if (bienCot<2)     // Neu dung thi phai bang 2, loai bo xung qua ngan, xung ngan thi chi bang 0 hoac 1 la cung
+            return 0;
+    }
+    // Den day da tim duoc 9 bit 1 roi, loc lay cac bit manchester luon cho nhanh.
+    // Neu o tren em4102Memory[bienDem110] co du lieu thi bienDem110 phai bang 2, con kg thi bienDem110 van bang 1.
+    for ( ;bienDem110<=110; )
+    {
+        XOA_DEM_RFID_CLK;
+        CANHLEN_RFID_DTA=0;
+        while(!CANHLEN_RFID_DTA)
+        {
+            bienHang=DEM_RFID_CLK;
+            if ((bienHang==XUNG_TPHONG)||(bienHang==(XUNG_TPHONG+32))||(bienHang==(XUNG_TPHONG+2*32))||(bienHang==(XUNG_TPHONG+3*32)))
+            {
+                // em4102Memory chay tu em4102Memory[1] -> em4102Memory[110]
+                em4102Memory[bienDem110]=RFID_DTA_SAMPLING;
+                ++bienDem110;
+                bienChung=1;
+                while ((DEM_RFID_CLK-bienHang)==0);
+                if (bienDem110>110) // Thoat ngay cho nhanh, vi co luc thay bienDem110 dem len den 113, co the gay loi sau nay
+                    break;
+            }
+            else
+                bienChung=0;
+
+            // Kiem tra nua truoc va nua sau cua manchester bit, hai nua nay phai luon khac nhau thi moi dung.
+            // Vi kg long nhieu lenh if duoc nen phai dung den bienChung.
+            if (((bienDem110-1)%2==0) && bienChung && (em4102Memory[bienDem110-1]==em4102Memory[bienDem110-2]))
+                return 0;
+            if (bienHang>(64+64+XUNG_TPHONG))  // Loai bo xung data qua dai
+                return 0;
+        }
+    }
+    // Them dieu kien nay nua de thoat cho nhanh, day la bit ket thuc bo nho em4102Memory.
+    // Toi day chac chan em4102Memory[110] phai khac em4102Memory[109] roi
+    if (em4102Memory[110]==0)
+        return 0;
+    return 1;
+}
+
+//**********************************************************************************************
+
+bool GiaiMaEm4102 (void)  // Ham GiaiMaEm4102 va Tim9Bit1 dat static thi kha nang kg quet the duoc.
+{
+    if (chutrinhGiaima==DO_RONG_XUNG_DTA)
+    {
+        // Do do rong xung.
+        if (bienLatGiaima)
+        {
+            bienLatGiaima=0;
+            XOA_DEM_RFID_CLK;
+            CANHLEN_RFID_DTA=0;
+            return 0; // Thoat ra cho nhanh-de con quet main nua, chu kg co van dc.
+        }
+        else if (DEM_RFID_CLK > (64+64+XUNG_TPHONG)) // Day la loai xung dai nhat, loai bo
+            return 0;
+        else if (!CANHLEN_RFID_DTA)    // Cho xung thu nhat
+            return 0;
+
+        // Khoang thoi gian giua xung thu nhat den xung thu 2 nho hon ~64 xung thi cung thoat-xung nay qua ngan.
+        if (DEM_RFID_CLK < (64-XUNG_TPHONG))
+            return 0;
+
+        chutrinhGiaima = DO_RONG_XUNG_DTA_CANH2;
+        bienLatGiaima=1;
+        return 0;
+    }
+    //.......................................................................................
+    else if (chutrinhGiaima==DO_RONG_XUNG_DTA_CANH2)
+    {
+        // Do do rong xung.
+        if (bienLatGiaima)
+        {
+            bienLatGiaima=0;
+            XOA_DEM_RFID_CLK;
+            CANHLEN_RFID_DTA=0;
+            return 0;
+        }
+        else if (DEM_RFID_CLK > (64+64+XUNG_TPHONG)) // Day la loai xung dai nhat, loai bo
+        {
+            chutrinhGiaima = DO_RONG_XUNG_DTA;
+            bienLatGiaima=1;
+            return 0;
+        }
+        else if (!CANHLEN_RFID_DTA)    // Cho xung thu 2
+            return 0;
+
+        // Khoang thoi gian giua xung thu nhat den xung thu 2 nho hon ~64 xung thi cung thoat-xung nay qua ngan.
+        if (DEM_RFID_CLK < (64-XUNG_TPHONG))
+        {
+            chutrinhGiaima = DO_RONG_XUNG_DTA;
+            bienLatGiaima=1;
+            return 0;
+        }
+        chutrinhGiaima = BATDAU_90MS;
+        return 0;
+    }
+    //.......................................................................................
+    else if (chutrinhGiaima==BATDAU_90MS)
+    {
+        // Xung EM4102 la 2Kbits/s thi can 31.25ms de truyen di het 64 bit trong bo nho cua no.
+        // Minh se doi 3 lan truyen het ROM cua EM4102.
+        tGiaima=tMs;
+        chutrinhGiaima = CHO_90MS_TIM9BIT1;
+        return 0;
+    }
+    //.......................................................................................
+    else if (chutrinhGiaima==CHO_90MS_TIM9BIT1)
+    {
+        // Bat dau giai ma
+        if (Tim9Bit1())
+        {
+            chutrinhGiaima = KTRA_PARITY;
+            return 0;  //Khong can doi het 90ms, thoat luon.
+        }
+        /*
+        Quet trong vong ~90ms:
+        Neu khong tim duoc Tim9Bit1 + chua qua 90ms nen van tiep tuc tim Tim9Bit1.
+        Neu khong tim duoc Tim9Bit1 + hon 90ms moi thoat hoan toan.
+
+        Quet the lan 1 thi maTran[][] mang gia tri dung, lan 2 khong quet the, nhung do anten qua nhay/anten dat gan
+        nhau hoac dat gan bo IOServer thi xung data gan giong luc co the, nen firmware qua duoc giai doan kiem tra
+        do rong xung; khong tim duoc 9bit1 nen timer_out 90ms.
+        Neu khong return 0 sau timer out 90ms, thi firmware tiep tuc kiem tra parity, va maTran[][] con mang gia
+        tri cua lan quet 1 nen cuoi cung GiaiMaEm4102=1
+        */
+        if (tMs-tGiaima >= TGIAN_GIAIMA)
+        {
+            chutrinhGiaima = DO_RONG_XUNG_DTA;
+            bienLatGiaima=1;
+            return 0;
+        }
+    }
+    //.......................................................................................
+    else if (chutrinhGiaima==KTRA_PARITY)
+    {
+        //Tong hop em4102Memory vao matran.
+        bienDem110=1;
+        for (bienHang=0; bienHang<11; ++bienHang)   //Tao ma tran cac bit giong het rom cua EM4102
+        {
+            for (bienCot=0; bienCot<5; ++bienCot)
+            {
+                manchesterBit=0;
+                for (bienChay=0; bienChay<2; ++bienChay)
+                {
+                    manchesterBit <<= 1 ;
+                    manchesterBit += em4102Memory[bienDem110];
+                    ++bienDem110;
+                }
+                maTran[bienHang][bienCot]=(manchesterBit >>= 1);
+            }
+        }
+
+        //Kiem tra parity hang
+        for (bienHang=0; bienHang<10; ++bienHang)
+        {
+            bienChay=0;
+            for (bienCot=0; bienCot<5; ++bienCot)
+            {
+                bienChay ^= maTran[bienHang][bienCot];
+            }
+            if (bienChay)   //Bang 1 neu parity khong hop le, parity chan
+            {
+                chutrinhGiaima = DO_RONG_XUNG_DTA;
+                bienLatGiaima=1;
+                return 0;
+            }
+        }
+
+        //Kiem tra parity cot
+        for (bienCot=0; bienCot<4; ++bienCot)
+        {
+            bienChay=0;
+            for (bienHang=0; bienHang<11; ++bienHang)
+            {
+                bienChay ^= maTran[bienHang][bienCot];
+            }
+            if (bienChay)   //Bang 1 neu parity khong hop le, parity chan
+            {
+                chutrinhGiaima = DO_RONG_XUNG_DTA;
+                bienLatGiaima=1;
+                return 0;
+            }
+        }
+
+        //Gan phan tu cua Matran vao em4102
+        for (bienChay=0; bienChay<5; ++bienChay)
+        {
+             for (bienHang = (bienChay*2); bienHang < (bienChay*2+2); ++bienHang)
+             {
+                 for (bienCot=0; bienCot < 4; ++bienCot)
+                 {
+                     em4102[bienChay] <<=1;
+                     em4102[bienChay] += maTran[bienHang][bienCot];
+                 }
+             }
+        }
+        chutrinhGiaima = DO_RONG_XUNG_DTA;
+        bienLatGiaima=1;
+
+        //Khi return, de tranh truong hop tat ca ma so deu bang 0, thi phai && 1
+        return ((em4102[0] || em4102[1] || em4102[2] || em4102[3] || em4102[4]) && 1);
+    }
+}
+
+//**********************************************************************************************
+
+/**@brief Callback function for asserts in the SoftDevice.
+ *
+ * @details This function will be called in case of an assert in the SoftDevice.
+ *
+ * @warning This handler is an example only and does not fit a final product. You need to analyze
+ *          how your product is supposed to react in case of Assert.
+ * @warning On assert from the SoftDevice, the system can only recover on reset.
+ *
+ * @param[in]   line_num   Line number of the failing ASSERT call.
+ * @param[in]   file_name  File name of the failing ASSERT call.
+ */
+void assert_nrf_callback(uint16_t line_num, const uint8_t * p_file_name)
+{
+    app_error_handler(DEAD_BEEF, line_num, p_file_name);
+}
+
+//**********************************************************************************************
+
+/**@brief Function for handling Service errors.
+ *
+ * @details A pointer to this function will be passed to each service which may need to inform the
+ *          application about an error.
+ *
+ * @param[in]   nrf_error   Error code containing information about what went wrong.
+ */
+static void service_error_handler(uint32_t nrf_error)
+{
+    APP_ERROR_HANDLER(nrf_error);
+}
+
+//**********************************************************************************************
+
+/**@brief Function for handling advertising errors.
+ *
+ * @param[in] nrf_error  Error code containing information about what went wrong.
+ */
+static void ble_advertising_error_handler(uint32_t nrf_error)
+{
+    APP_ERROR_HANDLER(nrf_error);
+}
+
+//**********************************************************************************************
+
+/**@brief Function for handling Queued Write Module errors.
+ *
+ * @details A pointer to this function will be passed to each service which may need to inform the
+ *          application about an error.
+ *
+ * @param[in]   nrf_error   Error code containing information about what went wrong.
+ */
+static void nrf_qwr_error_handler(uint32_t nrf_error)
+{
+    APP_ERROR_HANDLER(nrf_error);
+}
+
+//**********************************************************************************************
+
+static void conn_params_error_handler(uint32_t nrf_error)
+{
+    APP_ERROR_HANDLER(nrf_error); // nrf_error: Error code containing information about what went wrong.
+}
+
+//**********************************************************************************************
+
+static void battery_level_update(void)
+{
+    ret_code_t err_code;
+    err_code = ble_bas_battery_level_update(&m_bas, battLevel, BLE_CONN_HANDLE_ALL);
+    if ((err_code != NRF_SUCCESS) &&
+        (err_code != NRF_ERROR_INVALID_STATE) &&
+        (err_code != NRF_ERROR_RESOURCES) &&
+        (err_code != NRF_ERROR_BUSY) &&
+        (err_code != BLE_ERROR_GATTS_SYS_ATTR_MISSING)
+    )
+    {
+        APP_ERROR_HANDLER(err_code);
+    }
+}
+
+//**********************************************************************************************
+
+bool delete_bonds_pending(void)
+{
+    // Function for determening if there are one or more connections with bonds that are flagged for deletion.
+    ble_conn_state_conn_handle_list_t conn_handle_list = ble_conn_state_conn_handles();
+
+    for (uint32_t i = 0; i < conn_handle_list.len; i++)
+    {
+        uint16_t conn_handle = conn_handle_list.conn_handles[i];
+        bool pending         = ble_conn_state_user_flag_get(conn_handle, m_bms_bonds_to_delete);
+
+        if (pending == true)
+        {
+            return pending;
+        }
+    }
+    return false;
+}
+
+//**********************************************************************************************
+
+// Function for setting filtered whitelist. @param[in] skip  Filter passed to @ref pm_peer_id_list.
+static void whitelist_set(pm_peer_id_list_skip_t skip)
+{
+    pm_peer_id_t peer_ids[BLE_GAP_WHITELIST_ADDR_MAX_COUNT];
+    uint32_t     peer_id_count = BLE_GAP_WHITELIST_ADDR_MAX_COUNT;
+
+    ret_code_t err_code = pm_peer_id_list(peer_ids, &peer_id_count, PM_PEER_ID_INVALID, skip);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = pm_whitelist_set(peer_ids, peer_id_count);
+    APP_ERROR_CHECK(err_code);
+}
+
+//**********************************************************************************************
+
+// Function for setting filtered device identities. @param[in] skip  Filter passed to @ref pm_peer_id_list.
+static void identities_set(pm_peer_id_list_skip_t skip)
+{
+    pm_peer_id_t peer_ids[BLE_GAP_DEVICE_IDENTITIES_MAX_COUNT];
+    uint32_t     peer_id_count = BLE_GAP_DEVICE_IDENTITIES_MAX_COUNT;
+
+    ret_code_t err_code = pm_peer_id_list(peer_ids, &peer_id_count, PM_PEER_ID_INVALID, skip);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = pm_device_identities_list_set(peer_ids, peer_id_count);
+    APP_ERROR_CHECK(err_code);
+}
+
+//**********************************************************************************************
+
+static void delete_bonds(void)
+{
+    ret_code_t err_code;
+
+    delete_all_pending = true;
+    err_code = pm_peers_delete();
+    APP_ERROR_CHECK(err_code);
+}
+
+//**********************************************************************************************
+
+static void advertising_start(bool erase_bonds)
+{
+    // Khi khoi dong chua thay vao, luc bat dau bond moi thay chay vao day.
+    if (erase_bonds == true)
+    {
+        delete_bonds();
+        // Advertising is started by PM_EVT_PEERS_DELETE_SUCCEEDED event.
+    }
+    else
+    {
+        whitelist_set(PM_PEER_ID_LIST_SKIP_NO_ID_ADDR);
+        ret_code_t ret = ble_advertising_start(&m_advertising, BLE_ADV_MODE_DIRECTED_HIGH_DUTY);
+        APP_ERROR_CHECK(ret);
+    }
+}
+
+//**********************************************************************************************
+
+/**@brief Function for handling the Battery measurement timer timeout.
+ * @details This function will be called each time the battery level measurement timer expires.
+ * @param[in]   p_context   Pointer used for passing some arbitrary information (context) from the
+ *                          app_start_timer() call to the timeout handler.
+ */
+static void battery_level_meas_timeout_handler(void * p_context)
+{
+    UNUSED_PARAMETER(p_context);
+    battery_level_update();
+}
+
+//**********************************************************************************************
+
+static void read_glucose_measurement(void)
+{
+    ble_cgms_rec_t rec;
+    ret_code_t     err_code;
+
+    memset(&rec, 0, sizeof(ble_cgms_rec_t));
+    
+    dtaRfid=em4102[4];
+    dtaRfid=(dtaRfid<<8);
+    dtaRfid+=em4102[3];
+    dtaRfid=(dtaRfid<<8);
+    dtaRfid+=em4102[2];
+    dtaRfid=(dtaRfid<<8);
+    dtaRfid+=em4102[1];
+    dtaRfid=(dtaRfid<<8);
+    dtaRfid+=em4102[0];
+
+    rec.meas.glucose_concentration                 = dtaRfid;
+    rec.meas.sensor_status_annunciation.warning    = 0;
+    rec.meas.sensor_status_annunciation.calib_temp = 0;
+    rec.meas.sensor_status_annunciation.status     = 0;
+    rec.meas.flags                                 = 0;
+    rec.meas.time_offset                           = m_current_offset;
+    nrf_ble_cgms_meas_create(&m_cgms, &rec);
+
+    // Update status
+    m_cgms.sensor_status.time_offset = m_current_offset;
+    err_code = nrf_ble_cgms_update_status(&m_cgms, &m_cgms.sensor_status);
+    APP_ERROR_CHECK(err_code);
+}
+
+//**********************************************************************************************
+
+static void timers_init(void)
+{
+    ret_code_t err_code;
+
+    // Initialize timer module, making it use the scheduler.
+    err_code = app_timer_init();
+    APP_ERROR_CHECK(err_code);
+
+    // Create battery timers.
+    err_code = app_timer_create(&m_battery_timer_id, APP_TIMER_MODE_REPEATED, battery_level_meas_timeout_handler);
+    APP_ERROR_CHECK(err_code);
+
+    // Tao ham dinh thoi do muc pin
+    err_code = app_timer_create(&batt_level_timer_id, APP_TIMER_MODE_REPEATED, batt_level_timeout_handler);
+    APP_ERROR_CHECK(err_code);
+
+    // Tao ham dinh thoi tat EM4095
+    err_code = app_timer_create(&em4095_timer_id, APP_TIMER_MODE_REPEATED, Em4095_timeout_handler);
+    APP_ERROR_CHECK(err_code);
+}
+
+//**********************************************************************************************
+
+static void gap_params_init(void)
+{
+    // This function sets up all the necessary GAP (Generic Access Profile) parameters of the
+    // device including the device name, appearance, and the preferred connection parameters.
+    ret_code_t              err_code;
+    ble_gap_conn_params_t   gap_conn_params;
+    ble_gap_conn_sec_mode_t sec_mode;
+
+    BLE_GAP_CONN_SEC_MODE_SET_OPEN(&sec_mode);  // Cai dat security mode
+
+    if (*(uint32_t*)DCHI_TENTB == 0xFFFFFFFF)
+        err_code = sd_ble_gap_device_name_set(&sec_mode,(const uint8_t *)TENTB_MACDINH, strlen(TENTB_MACDINH));
+    else
+        err_code = sd_ble_gap_device_name_set(&sec_mode,(const uint8_t *)DCHI_TENTB, strlen((uint8_t*)DCHI_TENTB));
+    APP_ERROR_CHECK(err_code);
+
+    err_code = sd_ble_gap_appearance_set(BLE_APPEARANCE_GENERIC_GLUCOSE_METER);
+    APP_ERROR_CHECK(err_code);
+
+    memset(&gap_conn_params, 0, sizeof(gap_conn_params));
+
+    gap_conn_params.min_conn_interval = MIN_CONN_INTERVAL;
+    gap_conn_params.max_conn_interval = MAX_CONN_INTERVAL;
+    gap_conn_params.slave_latency     = SLAVE_LATENCY;
+    gap_conn_params.conn_sup_timeout  = CONN_SUP_TIMEOUT;
+
+    err_code = sd_ble_gap_ppcp_set(&gap_conn_params);
+    APP_ERROR_CHECK(err_code);
+}
+
+//**********************************************************************************************
+
+static void gatt_init(void)
+{
+    ret_code_t err_code = nrf_ble_gatt_init(&m_gatt, NULL);
+    APP_ERROR_CHECK(err_code);
+}
+
+//**********************************************************************************************
+
+static void cgms_evt_handler(nrf_ble_cgms_t * p_cgms, nrf_ble_cgms_evt_t * p_evt)
+{
+    ret_code_t err_code;
+    switch (p_evt->evt_type)
+    {
+        case NRF_BLE_CGMS_EVT_NOTIFICATION_ENABLED:
+        case NRF_BLE_CGMS_EVT_NOTIFICATION_DISABLED:
+            break;
+
+        case NRF_BLE_CGMS_EVT_START_SESSION:
+            break;
+
+        case NRF_BLE_CGMS_EVT_STOP_SESSION:
+            break;
+
+        case NRF_BLE_CGMS_EVT_WRITE_COMM_INTERVAL:
+            break;
+
+        default:
+            break;
+    }
+}
+
+//**********************************************************************************************
+
+void bms_evt_handler(nrf_ble_bms_t * p_ess, nrf_ble_bms_evt_t * p_evt)
+{
+    ret_code_t err_code;
+    switch (p_evt->evt_type)
+    {
+        case NRF_BLE_BMS_EVT_AUTH:
+        {
+            bool is_authorized = true;
+#if USE_AUTHORIZATION_CODE
+            if ((p_evt->auth_code.len != m_auth_code_len) ||
+                (memcmp(m_auth_code, p_evt->auth_code.code, m_auth_code_len) != 0))
+            {
+                is_authorized = false;
+            }
+#endif
+            err_code = nrf_ble_bms_auth_response(&m_bms, is_authorized);
+            APP_ERROR_CHECK(err_code);
+        } break; //NRF_BLE_BMS_EVT_AUTH
+
+        default:
+        break;
+    }
+}
+
+//**********************************************************************************************
+
+uint16_t qwr_evt_handler(nrf_ble_qwr_t * p_qwr, nrf_ble_qwr_evt_t * p_evt)
+{
+    return nrf_ble_bms_on_qwr_evt(&m_bms, &m_qwr, p_evt);
+}
+
+//**********************************************************************************************
+
+static void delete_disconnected_bonds(void)
+{
+    ret_code_t err_code;
+    ble_conn_state_conn_handle_list_t conn_handle_list = ble_conn_state_conn_handles();
+
+    for (uint32_t i = 0; i < conn_handle_list.len; i++)
+    {
+        pm_peer_id_t peer_id;
+        uint16_t conn_handle = conn_handle_list.conn_handles[i];
+        bool pending         = ble_conn_state_user_flag_get(conn_handle, m_bms_bonds_to_delete);
+
+        if (pending)
+        {
+            err_code = pm_peer_id_get(conn_handle, &peer_id);
+            if (err_code == NRF_SUCCESS)
+            {
+                err_code = pm_peer_delete(peer_id);
+                APP_ERROR_CHECK(err_code);
+            }
+        }
+        // Deletion is no longer pending for the bonds of this peer. Clear the flag.
+        ble_conn_state_user_flag_set(conn_handle, m_bms_bonds_to_delete, false);
+    }
+}
+
+//**********************************************************************************************
+
+static void delete_requesting_bond(nrf_ble_bms_t const * p_bms)
+{
+    ble_conn_state_user_flag_set(p_bms->conn_handle, m_bms_bonds_to_delete, true);
+}
+
+//**********************************************************************************************
+
+static void delete_all_bonds(nrf_ble_bms_t const * p_bms)
+{
+    ret_code_t err_code;
+    uint16_t conn_handle;
+
+    pm_peer_id_t peer_id = pm_next_peer_id_get(PM_PEER_ID_INVALID);
+    while (peer_id != PM_PEER_ID_INVALID)
+    {
+        err_code = pm_conn_handle_get(peer_id, &conn_handle);
+        APP_ERROR_CHECK(err_code);
+
+        if (conn_handle != BLE_CONN_HANDLE_INVALID)
+        {
+            /* Defer the deletion since this connection is active. */
+            ble_conn_state_user_flag_set(conn_handle, m_bms_bonds_to_delete, true);
+        }
+        else
+        {
+            err_code = pm_peer_delete(peer_id);
+            APP_ERROR_CHECK(err_code);
+        }
+
+        peer_id = pm_next_peer_id_get(peer_id);
+    }
+}
+
+//**********************************************************************************************
+
+static void services_init(void)
+{
+    ret_code_t          err_code;
+    nrf_ble_bms_init_t  bms_init;
+    nrf_ble_cgms_init_t cgms_init;
+    ble_dis_init_t      dis_init;
+    ble_bas_init_t      bas_init;
+    nrf_ble_qwr_init_t  qwr_init;
+
+    // Initialize Queued Write Module
+    memset(&qwr_init, 0, sizeof(qwr_init));
+    qwr_init.mem_buffer.len   = MEM_BUFF_SIZE;
+    qwr_init.mem_buffer.p_mem = m_mem;
+    qwr_init.callback         = qwr_evt_handler;
+    qwr_init.error_handler    = nrf_qwr_error_handler;
+
+    err_code = nrf_ble_qwr_init(&m_qwr, &qwr_init);
+    APP_ERROR_CHECK(err_code);
+
+    // Initialize Bond Management Service
+    memset(&bms_init, 0, sizeof(bms_init));
+
+    m_bms_bonds_to_delete  = ble_conn_state_user_flag_acquire();
+
+    bms_init.evt_handler   = bms_evt_handler;
+    bms_init.error_handler = service_error_handler;
+
+#if USE_AUTHORIZATION_CODE
+    bms_init.feature.delete_requesting_auth         = true;
+    bms_init.feature.delete_all_auth                = true;
+    bms_init.feature.delete_all_but_requesting_auth = false;
+#else
+    bms_init.feature.delete_requesting              = true;
+    bms_init.feature.delete_all                     = true;
+    bms_init.feature.delete_all_but_requesting      = false;
+#endif
+
+    bms_init.bms_feature_sec_req = SEC_JUST_WORKS;
+    bms_init.bms_ctrlpt_sec_req  = SEC_JUST_WORKS;
+
+    bms_init.p_qwr                            = &m_qwr;
+    bms_init.bond_callbacks.delete_requesting = delete_requesting_bond;
+    bms_init.bond_callbacks.delete_all        = delete_all_bonds;
+
+    err_code = nrf_ble_bms_init(&m_bms, &bms_init);
+    APP_ERROR_CHECK(err_code);
+
+    // Initialize Glucose Service - sample selection of feature bits
+    m_cgms.comm_interval = GLUCOSE_MEAS_INTERVAL; // Kg co thi kg chay
+    memset(&cgms_init, 0, sizeof(cgms_init));
+    cgms_init.evt_handler   = cgms_evt_handler;
+    cgms_init.error_handler = service_error_handler;
+    cgms_init.p_gatt_queue  = &m_ble_gatt_gueue;
+    cgms_init.initial_run_time = 20;
+    cgms_init.initial_sensor_status.time_offset    = 0x00;
+    cgms_init.initial_sensor_status.status.status |= NRF_BLE_CGMS_STATUS_SESSION_STOPPED;
+    err_code = nrf_ble_cgms_init(&m_cgms, &cgms_init);
+    APP_ERROR_CHECK(err_code);
+
+    //add a basic measurement with only mandatory fields
+
+    // Initialize Battery Service
+    memset(&bas_init, 0, sizeof(bas_init));
+
+    // Here the sec level for the Battery Service can be changed/increased.
+    bas_init.bl_rd_sec        = SEC_OPEN;
+    bas_init.bl_cccd_wr_sec   = SEC_OPEN;
+    bas_init.bl_report_rd_sec = SEC_OPEN;
+
+    bas_init.evt_handler          = NULL;
+    bas_init.support_notification = true;
+    bas_init.p_report_ref         = NULL;
+    bas_init.initial_batt_level   = 100;
+
+    err_code = ble_bas_init(&m_bas, &bas_init);
+    APP_ERROR_CHECK(err_code);
+
+    // Initialize Device Information Service.
+    memset(&dis_init, 0, sizeof(dis_init));
+
+    ble_srv_ascii_to_utf8(&dis_init.manufact_name_str, MANUFACTURER_NAME);
+
+    dis_init.dis_char_rd_sec = SEC_OPEN;
+
+    err_code = ble_dis_init(&dis_init);
+    APP_ERROR_CHECK(err_code);
+}
+
+//**********************************************************************************************
+
+static void application_timers_start(void)
+{
+    ret_code_t err_code;
+
+    // Start application timers.
+    err_code = app_timer_start(m_battery_timer_id, BATTERY_LEVEL_MEAS_INTERVAL, NULL);
+    APP_ERROR_CHECK(err_code);
+
+    // Bat dau chay thoi gian dinh thoi kiem tra muc pin
+    err_code = app_timer_start(batt_level_timer_id, DINH_THOI_KTRA_PIN, NULL);
+    APP_ERROR_CHECK(err_code);
+}
+
+//**********************************************************************************************
+
+/**@brief Function for handling the Connection Parameter events.
+ *
+ * @details This function will be called for all events in the Connection Parameters Module which
+ *          are passed to the application.
+ *          @note All this function does is to disconnect. This could have been done by simply
+ *                setting the disconnect_on_fail configuration parameter, but instead we use the
+ *                event handler mechanism to demonstrate its use.
+ *
+ * @param[in]   p_evt   Event received from the Connection Parameters Module.
+ */
+static void on_conn_params_evt(ble_conn_params_evt_t * p_evt)
+{
+    ret_code_t err_code;
+
+    if (p_evt->evt_type == BLE_CONN_PARAMS_EVT_FAILED)
+    {
+        err_code = sd_ble_gap_disconnect(m_conn_handle, BLE_HCI_CONN_INTERVAL_UNACCEPTABLE);
+        APP_ERROR_CHECK(err_code);
+    }
+}
+
+//**********************************************************************************************
+
+static void conn_params_init(void)
+{
+    ret_code_t             err_code;
+    ble_conn_params_init_t cp_init;
+    memset(&cp_init, 0, sizeof(cp_init));
+    cp_init.p_conn_params                  = NULL;
+    cp_init.first_conn_params_update_delay = FIRST_CONN_PARAMS_UPDATE_DELAY;
+    cp_init.next_conn_params_update_delay  = NEXT_CONN_PARAMS_UPDATE_DELAY;
+    cp_init.max_conn_params_update_count   = MAX_CONN_PARAMS_UPDATE_COUNT;
+    cp_init.start_on_notify_cccd_handle    = BLE_GATT_HANDLE_INVALID;
+    cp_init.disconnect_on_fail             = false;
+    cp_init.evt_handler                    = on_conn_params_evt;
+    cp_init.error_handler                  = conn_params_error_handler;
+    err_code = ble_conn_params_init(&cp_init);  // Sets the connection parameters based on the initialized cp_init variable.
+                                                // These are used by the Peripheral to request an update to the Connection Parameters from the Central
+    APP_ERROR_CHECK(err_code);
+}
+
+//**********************************************************************************************
+
+static void on_adv_evt(ble_adv_evt_t ble_adv_evt)
+{
+    ret_code_t err_code;
+    switch (ble_adv_evt)
+    {
+        case BLE_ADV_EVT_DIRECTED_HIGH_DUTY:
+            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING_DIRECTED);
+            APP_ERROR_CHECK(err_code);
+            break;
+
+        case BLE_ADV_EVT_FAST:
+            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING);
+            APP_ERROR_CHECK(err_code);
+            break;
+
+        case BLE_ADV_EVT_SLOW:
+            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING_SLOW);
+            APP_ERROR_CHECK(err_code);
+            break;
+
+        case BLE_ADV_EVT_FAST_WHITELIST:
+            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING_WHITELIST);
+            APP_ERROR_CHECK(err_code);
+            break;
+
+        case BLE_ADV_EVT_SLOW_WHITELIST:
+            err_code = bsp_indication_set(BSP_INDICATE_ADVERTISING_WHITELIST);
+            APP_ERROR_CHECK(err_code);
+            break;
+
+        case BLE_ADV_EVT_IDLE:
+            break;
+
+        case BLE_ADV_EVT_WHITELIST_REQUEST:
+         {
+            ble_gap_addr_t whitelist_addrs[BLE_GAP_WHITELIST_ADDR_MAX_COUNT];
+            ble_gap_irk_t  whitelist_irks[BLE_GAP_WHITELIST_ADDR_MAX_COUNT];
+            uint32_t addr_cnt = BLE_GAP_WHITELIST_ADDR_MAX_COUNT;
+            uint32_t irk_cnt  = BLE_GAP_WHITELIST_ADDR_MAX_COUNT;
+
+            err_code = pm_whitelist_get(whitelist_addrs, &addr_cnt, whitelist_irks,  &irk_cnt);
+            APP_ERROR_CHECK(err_code);
+
+            // Set the correct identities list (no excluding peers with no Central Address Resolution).
+            identities_set(PM_PEER_ID_LIST_SKIP_NO_IRK);
+
+            // Apply the whitelist.
+            err_code = ble_advertising_whitelist_reply(&m_advertising, whitelist_addrs, addr_cnt, whitelist_irks, irk_cnt);
+            APP_ERROR_CHECK(err_code);
+        } break;
+
+        case BLE_ADV_EVT_PEER_ADDR_REQUEST:
+        {
+            pm_peer_data_bonding_t peer_bonding_data;
+
+            // Only Give peer address if we have a handle to the bonded peer.
+            pm_peer_id_t peer_id = PM_PEER_ID_INVALID;
+            err_code = pm_peer_id_get(m_conn_handle , &peer_id);
+            APP_ERROR_CHECK(err_code);
+
+            if (peer_id != PM_PEER_ID_INVALID)
+            {
+                err_code = pm_peer_data_bonding_load(peer_id, &peer_bonding_data);
+                if (err_code != NRF_ERROR_NOT_FOUND)
+                {
+                    APP_ERROR_CHECK(err_code);
+
+                    // Manipulate identities to exclude peers with no Central Address Resolution.
+                    identities_set(PM_PEER_ID_LIST_SKIP_ALL);
+
+                    ble_gap_addr_t * p_peer_addr = &(peer_bonding_data.peer_ble_id.id_addr_info);
+                    err_code = ble_advertising_peer_addr_reply(&m_advertising, p_peer_addr);
+                    APP_ERROR_CHECK(err_code);
+                }
+            }
+        } break; //BLE_ADV_EVT_PEER_ADDR_REQUEST
+
+        default:
+            break;
+    }
+}
+
+//**********************************************************************************************
+
+static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
+{
+    ret_code_t err_code = NRF_SUCCESS;
+
+    switch (p_ble_evt->header.evt_id)
+    {
+        case BLE_GAP_EVT_CONNECTED:
+            knoiApp=1;  // Da ket noi duoc voi app
+            while(1)
+            {
+                err_code = app_timer_start(em4095_timer_id, TGIAN_TAT_EM4095, NULL); // Bat dau chay t.gian Stop/Run Em4095
+                if (err_code == NRF_SUCCESS)
+                    break;
+            }
+            NRF_P0->OUTSET = (1<<PinDieukhien5V); // Bat nguon 5V
+
+            err_code = bsp_indication_set(BSP_INDICATE_CONNECTED);
+            APP_ERROR_CHECK(err_code);
+            m_conn_handle = p_ble_evt->evt.gap_evt.conn_handle;
+            err_code = nrf_ble_bms_set_conn_handle(&m_bms, m_conn_handle);
+            APP_ERROR_CHECK(err_code);
+            err_code = nrf_ble_qwr_conn_handle_assign(&m_qwr, m_conn_handle);
+            APP_ERROR_CHECK(err_code);
+            err_code = nrf_ble_cgms_conn_handle_assign(&m_cgms, m_conn_handle);
+            APP_ERROR_CHECK(err_code);
+            break;
+
+        case BLE_GAP_EVT_DISCONNECTED:
+            knoiApp=0;  // Da ngat ket noi voi app
+            while(1)
+            {
+                err_code = app_timer_stop(em4095_timer_id);  // Ngung chay EM4095
+                if (err_code == NRF_SUCCESS)
+                    break;
+            }
+            TatNgoaiviQuetthe();
+            TatPWM0();
+            NRF_P0->OUTCLR = (1<<PinDieukhien5V); // Tat nguon 5V
+
+            if (delete_bonds_pending())
+            {
+                // Advertising is started by PM_EVT_PEERS_DELETE_SUCCEEDED or PM_EVT_PEERS_DELETE_SUCCEEDED event.
+                delete_disconnected_bonds();
+            }
+            else
+            {
+                advertising_start(false);
+            }
+            m_conn_handle = BLE_CONN_HANDLE_INVALID;
+            break;
+
+        case BLE_GAP_EVT_PHY_UPDATE_REQUEST:
+        {
+            ble_gap_phys_t const phys =
+            {
+                .rx_phys = BLE_GAP_PHY_AUTO,
+                .tx_phys = BLE_GAP_PHY_AUTO,
+            };
+            err_code = sd_ble_gap_phy_update(p_ble_evt->evt.gap_evt.conn_handle, &phys);
+            APP_ERROR_CHECK(err_code);
+        } break;
+
+        case BLE_GATTC_EVT_TIMEOUT:
+            // Disconnect on GATT Client timeout event.
+            err_code = sd_ble_gap_disconnect(p_ble_evt->evt.gattc_evt.conn_handle,
+                                             BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
+            APP_ERROR_CHECK(err_code);
+            break;
+
+        case BLE_GATTS_EVT_TIMEOUT:
+            // Disconnect on GATT Server timeout event.
+            err_code = sd_ble_gap_disconnect(p_ble_evt->evt.gatts_evt.conn_handle,
+                                             BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
+            APP_ERROR_CHECK(err_code);
+            break;
+
+        default:
+            // No implementation needed.
+            break;
+    }
+}
+
+//**********************************************************************************************
+
+static void ble_stack_init(void)
+{
+    ret_code_t err_code;
+
+    err_code = nrf_sdh_enable_request();
+    APP_ERROR_CHECK(err_code);
+
+    // Configure the BLE stack using the default settings.
+    // Fetch the start address of the application RAM.
+    uint32_t ram_start = 0;
+    err_code = nrf_sdh_ble_default_cfg_set(APP_BLE_CONN_CFG_TAG, &ram_start);
+    APP_ERROR_CHECK(err_code);
+
+    // Enable BLE stack.
+    err_code = nrf_sdh_ble_enable(&ram_start);
+    APP_ERROR_CHECK(err_code);
+
+    // Register a handler for BLE events.
+    NRF_SDH_BLE_OBSERVER(m_ble_observer, APP_BLE_OBSERVER_PRIO, ble_evt_handler, NULL);
+}
+
+//**********************************************************************************************
+
+static void bsp_event_handler(bsp_event_t event)
+{
+    ret_code_t err_code;
+    switch (event)
+    {
+        case BSP_EVENT_SLEEP:
+            break;
+
+        case BSP_EVENT_DISCONNECT:
+            err_code = sd_ble_gap_disconnect(m_conn_handle, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
+            if (err_code != NRF_ERROR_INVALID_STATE)
+            {
+                APP_ERROR_CHECK(err_code);
+            }
+            break;
+
+        case BSP_EVENT_WHITELIST_OFF:
+            if (m_conn_handle == BLE_CONN_HANDLE_INVALID)
+            {
+                err_code = ble_advertising_restart_without_whitelist(&m_advertising);
+                if (err_code != NRF_ERROR_INVALID_STATE)
+                {
+                    APP_ERROR_CHECK(err_code);
+                }
+            }
+            break;
+
+        case BSP_EVENT_KEY_2: // Nut nhan 3
+            // Luc binh thuong nhan button 3 de xoa bond
+            delete_bonds();
+            break;
+
+        case BSP_EVENT_KEY_3: // Nut nhan 4
+            // Bat dau gui du lieu len app
+            m_current_offset++; // La thong so status
+            if(m_current_offset>0xFFFE)
+                m_current_offset=0;
+            
+            read_glucose_measurement();
+            NRF_P0->OUTSET = (1<<BT_HANDLE_PIN);  // BT_HANDLE_PIN kich hoat xong thi tro ve trang thai ban dau
+            NRF_P0->OUTSET = LED3;  // Huy kich hoat
+            TatPWM0();
+            break;
+
+        default:
+            break;
+    }
+}
+
+//**********************************************************************************************
+
+static void pm_evt_handler(pm_evt_t const * p_evt)
+{
+    pm_handler_on_pm_evt(p_evt);
+    pm_handler_disconnect_on_sec_failure(p_evt);
+    pm_handler_flash_clean(p_evt);
+
+    switch (p_evt->evt_id)
+    {
+        case PM_EVT_PEER_DELETE_SUCCEEDED:
+            if (!delete_bonds_pending() && !delete_all_pending)
+            {
+                // No more peers are flagged for deletion and we are not going to delete all peers.
+                advertising_start(false);
+            }
+            break;
+
+        case PM_EVT_PEERS_DELETE_SUCCEEDED:
+            delete_all_pending = false;
+            advertising_start(false);
+            break;
+
+        case PM_EVT_PEER_DATA_UPDATE_SUCCEEDED:
+            if (     p_evt->params.peer_data_update_succeeded.flash_changed
+                 && (p_evt->params.peer_data_update_succeeded.data_id == PM_PEER_DATA_ID_BONDING))
+            {
+                // Note: You should check on what kind of white list policy your application should use.
+
+                whitelist_set(PM_PEER_ID_LIST_SKIP_NO_ID_ADDR);
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+//**********************************************************************************************
+
+static void peer_manager_init(void)
+{
+    ble_gap_sec_params_t sec_param;
+    ret_code_t err_code;
+
+    err_code = pm_init(); // initializes the Peer Manager module.
+    APP_ERROR_CHECK(err_code);
+
+    memset(&sec_param, 0, sizeof(ble_gap_sec_params_t));
+
+    // Security parameters to be used for all security procedures.
+    sec_param.bond           = 1;   // Perform bonding
+    sec_param.mitm           = 0;   // Man In The Middle protection not required
+    sec_param.lesc           = 0;   // LE Secure Connections not enabled
+    sec_param.keypress       = 0;   // Keypress notifications not enabled
+    sec_param.io_caps        = BLE_GAP_IO_CAPS_NONE; // No I/O capabilities
+    sec_param.oob            = 0;   // Out Of Band data not available
+    sec_param.min_key_size   = 7;   // Minimum encryption key size
+    sec_param.max_key_size   = 16;  // Maximum encryption key size
+    sec_param.kdist_own.enc  = 1;
+    sec_param.kdist_own.id   = 1;
+    sec_param.kdist_peer.enc = 1;
+    sec_param.kdist_peer.id  = 1;
+
+    err_code = pm_sec_params_set(&sec_param); // sets the Security Requirements for the connection.
+    APP_ERROR_CHECK(err_code);
+
+    err_code = pm_register(pm_evt_handler);
+    APP_ERROR_CHECK(err_code);
+}
+
+//**********************************************************************************************
+
+static void advertising_init(void)
+{
+    ret_code_t             err_code;
+    uint8_t                adv_flags;
+    ble_advertising_init_t init;
+
+    memset(&init, 0, sizeof(init));
+
+    adv_flags                                      = BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE;
+    init.advdata.name_type                         = BLE_ADVDATA_FULL_NAME;
+    init.advdata.include_appearance                = true;
+    init.advdata.flags                             = adv_flags;
+    init.advdata.uuids_complete.uuid_cnt           = sizeof(m_adv_uuids) / sizeof(m_adv_uuids[0]);
+    init.advdata.uuids_complete.p_uuids            = m_adv_uuids;
+
+    init.config.ble_adv_on_disconnect_disabled     = true;
+    init.config.ble_adv_whitelist_enabled          = true;
+    init.config.ble_adv_directed_high_duty_enabled = true;
+    init.config.ble_adv_directed_enabled           = false;
+    init.config.ble_adv_directed_interval          = 0;
+    init.config.ble_adv_directed_timeout           = 0;
+    init.config.ble_adv_fast_enabled               = true;
+    init.config.ble_adv_fast_interval              = APP_ADV_FAST_INTERVAL;
+    init.config.ble_adv_fast_timeout               = APP_ADV_FAST_DURATION;
+    init.config.ble_adv_slow_enabled               = true;
+    init.config.ble_adv_slow_interval              = APP_ADV_SLOW_INTERVAL;
+    init.config.ble_adv_slow_timeout               = APP_ADV_SLOW_DURATION;
+
+    init.evt_handler   = on_adv_evt;
+    init.error_handler = ble_advertising_error_handler;
+
+    err_code = ble_advertising_init(&m_advertising, &init);
+    APP_ERROR_CHECK(err_code);
+
+    ble_advertising_conn_cfg_tag_set(&m_advertising, APP_BLE_CONN_CFG_TAG);
+}
+
+//**********************************************************************************************
+
+static void buttons_leds_init(bool * p_erase_bonds)
+{
+    ret_code_t err_code;
+    bsp_event_t startup_event;
+
+    err_code = bsp_init(BSP_INIT_LEDS | BSP_INIT_BUTTONS, bsp_event_handler);
+    APP_ERROR_CHECK(err_code);
+
+    err_code = bsp_btn_ble_init(NULL, &startup_event);
+    APP_ERROR_CHECK(err_code);
+
+    *p_erase_bonds = (startup_event == BSP_EVENT_CLEAR_BONDING_DATA);
+}
+
+//**********************************************************************************************
+
+static void power_management_init(void)
+{
+    ret_code_t err_code;
+    err_code = nrf_pwr_mgmt_init();
+    APP_ERROR_CHECK(err_code);
+}
+
+//**********************************************************************************************
+
+int main(void)
+{
+    bool erase_bonds;
+
+    // Initialize.
+    timers_init();  // Dang ky cac ham tao timer
+    buttons_leds_init(&erase_bonds);  // Dang ky cho "bsp_event_handler"
+    power_management_init();
+    ble_stack_init(); // Dang ky cho "ble_evt_handler"
+    gap_params_init();
+    gatt_init();
+    advertising_init();
+    services_init();
+    sensorsim_init(&m_battery_sim_state, &m_battery_sim_cfg);
+    conn_params_init();
+    peer_manager_init();
+    application_timers_start(); // Bat dau chay cac ham timer
+    advertising_start(erase_bonds);
+
+    //......................................................................................
+
+    // Cai dat Timer1, dung de dem thoi gian muc dich chung
+    NRF_TIMER1->TASKS_STOP      = 1;
+    NRF_TIMER1->CC[0]		= 500;      // Moi lan tran la 1ms
+    NRF_TIMER1->SHORTS		= 1;        // Enable shortcut between COMPARE[0] event and CLEAR task
+    NRF_TIMER1->MODE		= 0;        // Che do Timer
+    NRF_TIMER1->BITMODE		= 3;        // 32 bit timer bit width
+    NRF_TIMER1->PRESCALER       = 5;        // Tu 0 den 9
+    NRF_TIMER1->TASKS_CLEAR     = 1;
+    NRF_TIMER1->INTENSET        = (1<<16);  // Enable interrupt for COMPARE[0] event
+    NVIC_SetPriority(TIMER1_IRQn, 6);
+    NVIC_ClearPendingIRQ(TIMER1_IRQn);
+    NVIC_EnableIRQ(TIMER1_IRQn);            // Kg co lenh nay thi kg chay
+    NRF_TIMER1->TASKS_START     = 1;
+    /* Dung loai ham nay khong chinh xac 1ms, ma con lam cho giai ma chay kg tot
+    static void tMs_timeout_handler(void * p_context)
+    {
+        ++tMs;
+    } */
+
+    //......................................................................................
+
+    // Cai dat chan dieu khien kich hoat gui du lieu qua BLE
+    NRF_P0->PIN_CNF[BT_HANDLE_PIN] = (1    | // Output
+                                     (0<<2)| // No pull
+                                     (0<<1)| // Connect input buffer
+                                     (3<<8));// High drive '0', high drive '1'
+    NRF_P0->OUTSET = (1<<BT_HANDLE_PIN);     // Binh thuong BT_HANDLE_PIN phai o muc 1, no kich hoat muc 0.
+
+    //......................................................................................
+
+    // Cai dat chan dieu khien EM4095
+    NRF_P0->PIN_CNF[ACTIVE_EM_PIN] = (1    | // Output
+                                     (0<<2)| // No pull
+                                     (0<<1)| // Connect input buffer
+                                     (3<<8));// High drive '0', high drive '1'
+    NRF_P0->OUTCLR = (1<<ACTIVE_EM_PIN);     // Binh thuong ACTIVE_EM_PIN phai o muc 0-de EM4095 kg chay.
+
+    //......................................................................................
+
+    // Cai dat chan dieu khien buzzer
+    NRF_P0->PIN_CNF[BUZZER] = (1    | // Output
+                              (0<<2)| // No pull
+                              (0<<1)| // Connect input buffer
+                              (3<<8));// High drive '0', high drive '1'
+    NRF_P0->OUTCLR = (1<<BUZZER);     // Cung la trang thai cua chan khi tat PWM
+
+    //......................................................................................
+
+    // Cai dat chan dieu khien 5V
+    NRF_P0->PIN_CNF[PinDieukhien5V] = (1    | // Output
+                                      (0<<2)| // No pull
+                                      (0<<1)| // Connect input buffer
+                                      (3<<8));// High drive '0', high drive '1'
+    NRF_P0->OUTCLR = (1<<PinDieukhien5V);
+
+    //......................................................................................
+
+    // Cai dat chan lay mau tin hieu RFID data
+    NRF_P0->PIN_CNF[RFID_DTA_PIN1] = ((0<<2)|   // No pull
+                                      (0<<1)|   // Connect input buffer
+                                      (3<<8));  // High drive '0', high drive '1'
+    //......................................................................................
+
+    // Cai dat chan TestPoint_24 de debug
+    NRF_P0->PIN_CNF[TEST_POINT_P24] = (1    | // Output
+                                      (0<<2)| // No pull
+                                      (0<<1)| // Connect input buffer
+                                      (3<<8));// High drive '0', high drive '1'
+    NRF_P0->OUTCLR = (1<<TEST_POINT_P24);
+
+    //......................................................................................
+
+    // Cai dat chan TestPoint_26 de debug
+    NRF_P0->PIN_CNF[TEST_POINT_P26] = (1    | // Output
+                                      (0<<2)| // No pull
+                                      (0<<1)| // Connect input buffer
+                                      (3<<8));// High drive '0', high drive '1'
+    NRF_P0->OUTCLR = (1<<TEST_POINT_P26);
+
+    //......................................................................................
+
+    // Keu coi bao hieu khoi dong
+    BatPWM0();
+
+    //......................................................................................
+
+    for (;;)
+    {
+        if(knoiApp==0)
+        {
+            // Tu dong System On Sleep
+            // Ham nay xu ly mat 1ms, nen quet the kg nhay
+            nrf_pwr_mgmt_run();
+        }
+        else if((knoiApp==0x11) && GiaiMaEm4102()) // Kg co ketnoi app thi bo qua cho khoi ton pin.
+        {
+            if (tChongLapThe==0 || em4102Sub[0]!=em4102[0] || em4102Sub[1]!=em4102[1]
+            || em4102Sub[2]!=em4102[2] || em4102Sub[3]!=em4102[3] || em4102Sub[4]!=em4102[4])
+            {
+                BatPWM0();  // Coi keu bao hieu da quet duoc the
+                NRF_P0->OUTCLR = (1<<BT_HANDLE_PIN);  // Kich hoat gui ma the len app.
+                NRF_P0->OUTCLR = LED3;  // Nhay den LED3 de bao hieu.
+                                        // Sau khi gui xong thi ham con khac se huy kich hoat LED3.
+                                        // Do bang Oscilo thay thong thuong kich hoat trong 74ms (cung kha lau).
+                
+                //Dat lai bien em4102Sub
+                for (bienChay=0; bienChay<SO_BYTES_TRONG_MASOTHE; bienChay++)
+                {
+                    em4102Sub[bienChay]=em4102[bienChay];
+                }
+                tChongLapThe=tMs;
+            }
+        }
+        // Het thoi gian chong lap the, cho quet the tro lai
+        if (tChongLapThe && (tMs-tChongLapThe >= TGIAN_CHONGLAPTHE))
+        {
+            for (bienChay=0; bienChay<SO_BYTES_TRONG_MASOTHE; bienChay++)
+            {
+                em4102Sub[bienChay]=0;  //Reset lai gia tri cho bien em4102Sub.
+            }
+            tChongLapThe=0;
+        }
+        // Tat coi bao hieu khoi dong
+        if ((!tCoikeu) && (tMs-tCoikeu >= TGIAN_COIKEU)) // Chi cho chay vao day 1 lan duy nhat khi khoi dong
+        {
+            tCoikeu=1;  // Mien khac 0 la duoc
+            TatPWM0();
+        }
+    }
+}
